@@ -30,7 +30,7 @@ repo_id = "lerobot/pusht"
 
 # You can easily load a dataset from a Hugging Face repository
 dataset = LeRobotDataset(repo_id)
-
+breakpoint()
 # LeRobotDataset is actually a thin wrapper around an underlying Hugging Face dataset
 # (see https://huggingface.co/docs/datasets/index for more information).
 print(dataset)

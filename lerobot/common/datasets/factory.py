@@ -71,6 +71,62 @@ def make_dataset(cfg, split: str = "train") -> LeRobotDataset | MultiLeRobotData
 
     resolve_delta_timestamps(cfg)
 
+
+    # TODO
+    if cfg.env.name == "foraging":
+        from efficient_routing.exp.foraging.generate_data import generate_data_foraging, data_dict_to_hf, generate_data_foraging_home
+        from lerobot.common.datasets.compute_stats import compute_stats
+
+        # Set up the dataset.
+        delta_timestamps = {
+            # Load the previous image and state at -0.1 seconds before current frame,
+            # then load current image and state corresponding to 0.0 second.
+            "observation.image": [-0.1, 0.0],
+            "observation.state": [-0.1, 0.0],
+            # Load the previous action (-0.1), the next action to be executed (0.0),
+            # and 14 future actions with a 0.1 seconds spacing. All these actions will be
+            # used to supervise the policy.
+            "action": [-0.1, 0.0, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0, 1.1, 1.2, 1.3, 1.4],
+        }
+
+        fps = 10
+        # total_steps = 100
+        # total_steps = 1000
+        total_steps = 10000
+        # total_steps = 100000
+
+        print("Generating data...")
+        # data_dict, episode_data_index = generate_data_foraging(
+        # TODO: caching
+        data_dict, episode_data_index = generate_data_foraging_home(
+            reset_interval=2000,
+            total_steps=total_steps,
+            episode_length=50,
+            fps=fps
+        )
+        print("Data generated.")
+        hf_dataset = data_dict_to_hf(data_dict)
+        info = {
+            "fps": fps,
+        }
+
+        # create dataset without delta_timesteps to compute stats (compute_stats function doesn't expect an additional dim for observation horizon)
+        temp_dataset = LeRobotDataset.from_preloaded(
+            hf_dataset=hf_dataset,
+            episode_data_index=episode_data_index
+        )
+        stats = compute_stats(temp_dataset, 32, 8)
+
+        dataset = LeRobotDataset.from_preloaded(
+            hf_dataset=hf_dataset,
+            episode_data_index=episode_data_index,
+            delta_timestamps=delta_timestamps,
+            info=info,
+            stats=stats
+        )
+        
+        return dataset
+
     # TODO(rcadene): add data augmentations
 
     if isinstance(cfg.dataset_repo_id, str):
