@@ -360,6 +360,21 @@ def eval_policy(
                 )
                 thread.start()
                 threads.append(thread)
+
+                # Nathan: added to save as gif
+                gif_path = videos_dir / f"gif/eval_episode_{n_episodes_rendered}.gif"
+                gif_path.parent.mkdir(parents=True, exist_ok=True)
+                thread = threading.Thread(
+                    target=write_video,
+                    args=(
+                        str(gif_path),
+                        stacked_frames[: done_index + 1],  # + 1 to capture the last observation
+                        env.unwrapped.metadata["render_fps"],
+                    ),
+                )
+                thread.start()
+                threads.append(thread)
+
                 n_episodes_rendered += 1
 
         progbar.set_postfix(

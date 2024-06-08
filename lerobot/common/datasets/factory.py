@@ -74,7 +74,7 @@ def make_dataset(cfg, split: str = "train") -> LeRobotDataset | MultiLeRobotData
 
     # TODO
     if cfg.env.name == "foraging":
-        from efficient_routing.exp.foraging.generate_data import generate_data_foraging, data_dict_to_hf, generate_data_foraging_home
+        from efficient_routing.exp.foraging.generate_data import generate_data, generate_data_foraging, data_dict_to_hf, generate_data_foraging_home
         from lerobot.common.datasets.compute_stats import compute_stats
 
         # Set up the dataset.
@@ -98,12 +98,14 @@ def make_dataset(cfg, split: str = "train") -> LeRobotDataset | MultiLeRobotData
         print("Generating data...")
         # data_dict, episode_data_index = generate_data_foraging(
         # TODO: caching
-        data_dict, episode_data_index = generate_data_foraging_home(
-            reset_interval=2000,
-            total_steps=total_steps,
-            episode_length=50,
-            fps=fps
-        )
+        # data_dict, episode_data_index = generate_data_foraging_home(
+        #     reset_interval=2000,
+        #     total_steps=total_steps,
+        #     episode_length=50,
+        #     fps=fps
+        # )
+        data_dict, episode_data_index = generate_data("foraging-home", "foraging-home", 100, 10000, fps=fps)
+
         print("Data generated.")
         hf_dataset = data_dict_to_hf(data_dict)
         info = {
