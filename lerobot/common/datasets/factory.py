@@ -72,45 +72,48 @@ def make_dataset(cfg, split: str = "train") -> LeRobotDataset | MultiLeRobotData
     resolve_delta_timestamps(cfg)
 
 
-    # TODO
-    if cfg.env.name == "foraging":
-        from efficient_routing.exp.foraging.generate_data import generate_data, generate_data_foraging, data_dict_to_hf, generate_data_foraging_home
+    # TODO: temp
+    if cfg.env.name in ["foraging", "maze"]:
+        from efficient_routing.exp.foraging.generate_data import data_dict_to_hf
         from lerobot.common.datasets.compute_stats import compute_stats
 
-        # Set up the dataset.
-        delta_timestamps = {
-            # Load the previous image and state at -0.1 seconds before current frame,
-            # then load current image and state corresponding to 0.0 second.
-            "observation.image": [-0.1, 0.0],
-            "observation.state": [-0.1, 0.0],
-            # Load the previous action (-0.1), the next action to be executed (0.0),
-            # and 14 future actions with a 0.1 seconds spacing. All these actions will be
-            # used to supervise the policy.
-            "action": [-0.1, 0.0, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0, 1.1, 1.2, 1.3, 1.4],
-        }
+        fps = cfg.fps
+        horizon = cfg.policy.horizon
+        n_obs_steps = cfg.policy.n_obs_steps
+        delta_timestamps = {}
+        delta_timestamps["observation.image"] = [i / fps for i in range(1 - n_obs_steps, 1)]
+        delta_timestamps["observation.state"] = [i / fps for i in range(1 - n_obs_steps, 1)]
+        delta_timestamps["action"] =[i / fps for i in range(1 - n_obs_steps, 1 - n_obs_steps + horizon)]
 
-        fps = 10
-        # total_steps = 100
-        # total_steps = 1000
-        total_steps = 10000
-        # total_steps = 100000
 
-        print("Generating data...")
-        # data_dict, episode_data_index = generate_data_foraging(
         # TODO: caching
-        # data_dict, episode_data_index = generate_data_foraging_home(
-        #     reset_interval=2000,
-        #     total_steps=total_steps,
-        #     episode_length=50,
-        #     fps=fps
-        # )
-        data_dict, episode_data_index = generate_data("foraging-home", "foraging-home", 100, 10000, fps=fps)
+        print("Generating data...")
+
+        if cfg.env.name == "foraging":
+            from efficient_routing.exp.foraging.generate_data import generate_data
+            data_dict, episode_data_index = generate_data(
+                env_id=cfg.env.task,
+                agent_id=cfg.env.task,
+                total_episodes=cfg.dataset.total_episodes,
+                episode_length=cfg.dataset.episode_length,
+                fps=fps
+            )
+
+        elif cfg.env.name == "maze":
+            from efficient_routing.exp.maze.generate_data import generate_maze_data
+            data_dict, episode_data_index = generate_maze_data(
+                env_id=cfg.env.task,
+                agent_id="astar",
+                total_episodes=cfg.dataset.total_episodes,
+                episode_length=cfg.dataset.episode_length,
+                obs_size=(cfg.env.image_size, cfg.env.image_size),
+                fps=fps
+            )
 
         print("Data generated.")
+
         hf_dataset = data_dict_to_hf(data_dict)
-        info = {
-            "fps": fps,
-        }
+        info = {"fps": fps}
 
         # create dataset without delta_timesteps to compute stats (compute_stats function doesn't expect an additional dim for observation horizon)
         temp_dataset = LeRobotDataset.from_preloaded(
