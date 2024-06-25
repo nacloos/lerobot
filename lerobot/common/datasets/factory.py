@@ -19,6 +19,7 @@ import torch
 from omegaconf import ListConfig, OmegaConf
 
 from lerobot.common.datasets.lerobot_dataset import LeRobotDataset, MultiLeRobotDataset
+from lerobot.common.datasets.transforms import get_image_transforms
 
 
 def resolve_delta_timestamps(cfg):
@@ -139,10 +140,16 @@ def make_dataset(cfg, split: str = "train") -> LeRobotDataset | MultiLeRobotData
             cfg.dataset_repo_id,
             split=split,
             delta_timestamps=cfg.training.get("delta_timestamps"),
+            image_transforms=image_transforms,
+            video_backend=cfg.video_backend,
         )
     else:
         dataset = MultiLeRobotDataset(
-            cfg.dataset_repo_id, split=split, delta_timestamps=cfg.training.get("delta_timestamps")
+            cfg.dataset_repo_id,
+            split=split,
+            delta_timestamps=cfg.training.get("delta_timestamps"),
+            image_transforms=image_transforms,
+            video_backend=cfg.video_backend,
         )
 
     if cfg.get("override_dataset_stats"):
