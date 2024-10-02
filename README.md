@@ -22,8 +22,22 @@
 
 </div>
 
+<h2 align="center">
+    <p><a href="https://github.com/huggingface/lerobot/blob/main/examples/7_get_started_with_real_robot.md">Hot new tutorial: Getting started with real-world robots</a></p>
+</h2>
+
+<div align="center">
+    <img src="media/tutorial/koch_v1_1_leader_follower.webp?raw=true" alt="Koch v1.1 leader and follower arms" title="Koch v1.1 leader and follower arms" width="50%">
+    <p>We just dropped an in-depth tutorial on how to build your own robot!</p>
+    <p>Teach it new skills by showing it a few moves with just a laptop.</p>
+    <p>Then watch your homemade robot act autonomously 🤯</p>
+    <p>For more info, see <a href="https://x.com/RemiCadene/status/1825455895561859185">our thread on X</a> or <a href="https://github.com/huggingface/lerobot/blob/main/examples/7_get_started_with_real_robot.md">our tutorial page</a>.</p>
+</div>
+
+<br/>
+
 <h3 align="center">
-    <p>State-of-the-art Machine Learning for real-world robotics</p>
+    <p>LeRobot: State-of-the-art AI for real-world robotics</p>
 </h3>
 
 ---
@@ -58,23 +72,26 @@
 - Thanks to Cheng Chi, Zhenjia Xu and colleagues for open sourcing Diffusion policy, Pusht environment and datasets, as well as UMI datasets. Ours are adapted from [Diffusion Policy](https://diffusion-policy.cs.columbia.edu) and [UMI Gripper](https://umi-gripper.github.io).
 - Thanks to Nicklas Hansen, Yunhai Feng and colleagues for open sourcing TDMPC policy, Simxarm environments and datasets. Ours are adapted from [TDMPC](https://github.com/nicklashansen/tdmpc) and [FOWM](https://www.yunhaifeng.com/FOWM).
 - Thanks to Antonio Loquercio and Ashish Kumar for their early support.
+- Thanks to [Seungjae (Jay) Lee](https://sjlee.cc/), [Mahi Shafiullah](https://mahis.life/) and colleagues for open sourcing [VQ-BeT](https://sjlee.cc/vq-bet/) policy and helping us adapt the codebase to our repository. The policy is adapted from [VQ-BeT repo](https://github.com/jayLEE0301/vq_bet_official).
 
 
 ## Installation
 
 Download our source code:
 ```bash
-git clone https://github.com/huggingface/lerobot.git && cd lerobot
+git clone https://github.com/huggingface/lerobot.git
+cd lerobot
 ```
 
 Create a virtual environment with Python 3.10 and activate it, e.g. with [`miniconda`](https://docs.anaconda.com/free/miniconda/index.html):
 ```bash
-conda create -y -n lerobot python=3.10 && conda activate lerobot
+conda create -y -n lerobot python=3.10
+conda activate lerobot
 ```
 
 Install 🤗 LeRobot:
 ```bash
-pip install .
+pip install -e .
 ```
 
 > **NOTE:** Depending on your platform, If you encounter any build errors during this step
@@ -88,7 +105,7 @@ For simulations, 🤗 LeRobot comes with gymnasium environments that can be inst
 
 For instance, to install 🤗 LeRobot with aloha and pusht, use:
 ```bash
-pip install ".[aloha, pusht]"
+pip install -e ".[aloha, pusht]"
 ```
 
 To use [Weights and Biases](https://docs.wandb.ai/quickstart) for experiment tracking, log in with
@@ -113,10 +130,12 @@ wandb login
 |   |   ├── datasets       # various datasets of human demonstrations: aloha, pusht, xarm
 |   |   ├── envs           # various sim environments: aloha, pusht, xarm
 |   |   ├── policies       # various policies: act, diffusion, tdmpc
+|   |   ├── robot_devices  # various real devices: dynamixel motors, opencv cameras, koch robots
 |   |   └── utils          # various utilities
 |   └── scripts          # contains functions to execute via command line
 |       ├── eval.py                 # load policy and evaluate it on an environment
 |       ├── train.py                # train a policy via imitation learning and/or reinforcement learning
+|       ├── control_robot.py        # teleoperate a real robot, record data, run a policy
 |       ├── push_dataset_to_hub.py  # convert your dataset into LeRobot dataset format and upload it to the Hugging Face hub
 |       └── visualize_dataset.py    # load a dataset and render its demonstrations
 ├── outputs               # contains results of scripts execution: logs, videos, model checkpoints
@@ -179,8 +198,10 @@ dataset attributes:
   │  ├ observation.images.cam_high: {'max': tensor with same number of dimensions (e.g. `(c, 1, 1)` for images, `(c,)` for states), etc.}
   │  ...
   ├ info: a dictionary of metadata on the dataset
+  │  ├ codebase_version (str): this is to keep track of the codebase version the dataset was created with
   │  ├ fps (float): frame per second the dataset is recorded/synchronized to
-  │  └ video (bool): indicates if frames are encoded in mp4 video files to save space or stored as png files
+  │  ├ video (bool): indicates if frames are encoded in mp4 video files to save space or stored as png files
+  │  └ encoding (dict): if video, this documents the main options that were used with ffmpeg to encode the videos
   ├ videos_dir (Path): where the mp4 videos or png images are stored/accessed
   └ camera_keys (list of string): the keys to access camera features in the item returned by the dataset (e.g. `["observation.images.cam_high", ...]`)
 ```
@@ -246,13 +267,20 @@ checkpoints
 │   └── training_state.pth  # optimizer/scheduler/rng state and training step
 ```
 
+To resume training from a checkpoint, you can add these to the `train.py` python command:
+```bash
+    hydra.run.dir=your/original/experiment/dir resume=true
+```
+
+It will load the pretrained model, optimizer and scheduler states for training. For more information please see our tutorial on training resumption [here](https://github.com/huggingface/lerobot/blob/main/examples/5_resume_training.md).
+
 To use wandb for logging training and evaluation curves, make sure you've run `wandb login` as a one-time setup step. Then, when running the training command above, enable WandB in the configuration by adding:
 
 ```bash
     wandb.enable=true
 ```
 
-A link to the wandb logs for the run will also show up in yellow in your terminal. Here is an example of what they look like in your browser:
+A link to the wandb logs for the run will also show up in yellow in your terminal. Here is an example of what they look like in your browser. Please also check [here](https://github.com/huggingface/lerobot/blob/main/examples/4_train_policy_with_script.md#typical-logs-and-metrics) for the explaination of some commonly used metrics in logs.
 
 ![](media/wandb.png)
 
@@ -339,11 +367,53 @@ with profile(
 ## Citation
 
 If you want, you can cite this work with:
-```
+```bibtex
 @misc{cadene2024lerobot,
     author = {Cadene, Remi and Alibert, Simon and Soare, Alexander and Gallouedec, Quentin and Zouitine, Adil and Wolf, Thomas},
     title = {LeRobot: State-of-the-art Machine Learning for Real-World Robotics in Pytorch},
     howpublished = "\url{https://github.com/huggingface/lerobot}",
     year = {2024}
+}
+```
+
+Additionally, if you are using any of the particular policy architecture, pretrained models, or datasets, it is recommended to cite the original authors of the work as they appear below:
+
+- [Diffusion Policy](https://diffusion-policy.cs.columbia.edu)
+```bibtex
+@article{chi2024diffusionpolicy,
+	author = {Cheng Chi and Zhenjia Xu and Siyuan Feng and Eric Cousineau and Yilun Du and Benjamin Burchfiel and Russ Tedrake and Shuran Song},
+	title ={Diffusion Policy: Visuomotor Policy Learning via Action Diffusion},
+	journal = {The International Journal of Robotics Research},
+	year = {2024},
+}
+```
+- [ACT or ALOHA](https://tonyzhaozh.github.io/aloha)
+```bibtex
+@article{zhao2023learning,
+  title={Learning fine-grained bimanual manipulation with low-cost hardware},
+  author={Zhao, Tony Z and Kumar, Vikash and Levine, Sergey and Finn, Chelsea},
+  journal={arXiv preprint arXiv:2304.13705},
+  year={2023}
+}
+```
+
+- [TDMPC](https://www.nicklashansen.com/td-mpc/)
+
+```bibtex
+@inproceedings{Hansen2022tdmpc,
+	title={Temporal Difference Learning for Model Predictive Control},
+	author={Nicklas Hansen and Xiaolong Wang and Hao Su},
+	booktitle={ICML},
+	year={2022}
+}
+```
+
+- [VQ-BeT](https://sjlee.cc/vq-bet/)
+```bibtex
+@article{lee2024behavior,
+  title={Behavior generation with latent actions},
+  author={Lee, Seungjae and Wang, Yibin and Etukuru, Haritheja and Kim, H Jin and Shafiullah, Nur Muhammad Mahi and Pinto, Lerrel},
+  journal={arXiv preprint arXiv:2403.03181},
+  year={2024}
 }
 ```
