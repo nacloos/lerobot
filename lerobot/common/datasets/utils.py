@@ -15,16 +15,26 @@
 # limitations under the License.
 import json
 import re
+import warnings
+from functools import cache
 from pathlib import Path
 from typing import Dict
 
 import datasets
 import torch
 from datasets import load_dataset, load_from_disk
-from huggingface_hub import hf_hub_download, snapshot_download
+from huggingface_hub import DatasetCard, HfApi, hf_hub_download, snapshot_download
 from PIL import Image as PILImage
 from safetensors.torch import load_file
 from torchvision import transforms
+
+DATASET_CARD_TEMPLATE = """
+---
+# Metadata will go there
+---
+This dataset was created using [LeRobot](https://github.com/huggingface/lerobot).
+
+"""
 
 
 def flatten_dict(d, parent_key="", sep="/"):
@@ -70,6 +80,11 @@ def hf_transform_to_torch(items_dict: dict[torch.Tensor | None]):
         if isinstance(first_item, PILImage.Image):
             to_tensor = transforms.ToTensor()
             items_dict[key] = [to_tensor(img) for img in items_dict[key]]
+        elif isinstance(first_item, str):
+            # TODO (michel-aractingi): add str2embedding via language tokenizer
+            # For now we leave this part up to the user to choose how to address
+            # language conditioned tasks
+            pass
         elif isinstance(first_item, dict) and "path" in first_item and "timestamp" in first_item:
             # video frame will be processed downstream
             pass
@@ -80,7 +95,28 @@ def hf_transform_to_torch(items_dict: dict[torch.Tensor | None]):
     return items_dict
 
 
-def load_hf_dataset(repo_id, version, root, split) -> datasets.Dataset:
+@cache
+def get_hf_dataset_safe_version(repo_id: str, version: str) -> str:
+    api = HfApi()
+    dataset_info = api.list_repo_refs(repo_id, repo_type="dataset")
+    branches = [b.name for b in dataset_info.branches]
+    if version not in branches:
+        warnings.warn(
+            f"""You are trying to load a dataset from {repo_id} created with a previous version of the
+            codebase. The following versions are available: {branches}.
+            The requested version ('{version}') is not found. You should be fine since
+            backward compatibility is maintained. If you encounter a problem, contact LeRobot maintainers on
+            Discord ('https://discord.com/invite/s3KuuzsPFb') or open an issue on github.""",
+            stacklevel=1,
+        )
+        if "main" not in branches:
+            raise ValueError(f"Version 'main' not found on {repo_id}")
+        return "main"
+    else:
+        return version
+
+
+def load_hf_dataset(repo_id: str, version: str, root: Path, split: str) -> datasets.Dataset:
     """hf_dataset contains all the observations, states, actions, rewards, etc."""
     if root is not None:
         hf_dataset = load_from_disk(str(Path(root) / repo_id / "train"))
@@ -101,7 +137,9 @@ def load_hf_dataset(repo_id, version, root, split) -> datasets.Dataset:
                     f'`split` ({split}) should either be "train", "train[INT:]", or "train[:INT]"'
                 )
     else:
-        hf_dataset = load_dataset(repo_id, revision=version, split=split)
+        safe_version = get_hf_dataset_safe_version(repo_id, version)
+        hf_dataset = load_dataset(repo_id, revision=safe_version, split=split)
+
     hf_dataset.set_transform(hf_transform_to_torch)
     return hf_dataset
 
@@ -119,8 +157,9 @@ def load_episode_data_index(repo_id, version, root) -> dict[str, torch.Tensor]:
     if root is not None:
         path = Path(root) / repo_id / "meta_data" / "episode_data_index.safetensors"
     else:
+        safe_version = get_hf_dataset_safe_version(repo_id, version)
         path = hf_hub_download(
-            repo_id, "meta_data/episode_data_index.safetensors", repo_type="dataset", revision=version
+            repo_id, "meta_data/episode_data_index.safetensors", repo_type="dataset", revision=safe_version
         )
 
     return load_file(path)
@@ -137,7 +176,10 @@ def load_stats(repo_id, version, root) -> dict[str, dict[str, torch.Tensor]]:
     if root is not None:
         path = Path(root) / repo_id / "meta_data" / "stats.safetensors"
     else:
-        path = hf_hub_download(repo_id, "meta_data/stats.safetensors", repo_type="dataset", revision=version)
+        safe_version = get_hf_dataset_safe_version(repo_id, version)
+        path = hf_hub_download(
+            repo_id, "meta_data/stats.safetensors", repo_type="dataset", revision=safe_version
+        )
 
     stats = load_file(path)
     return unflatten_dict(stats)
@@ -154,7 +196,8 @@ def load_info(repo_id, version, root) -> dict:
     if root is not None:
         path = Path(root) / repo_id / "meta_data" / "info.json"
     else:
-        path = hf_hub_download(repo_id, "meta_data/info.json", repo_type="dataset", revision=version)
+        safe_version = get_hf_dataset_safe_version(repo_id, version)
+        path = hf_hub_download(repo_id, "meta_data/info.json", repo_type="dataset", revision=safe_version)
 
     with open(path) as f:
         info = json.load(f)
@@ -166,7 +209,8 @@ def load_videos(repo_id, version, root) -> Path:
         path = Path(root) / repo_id / "videos"
     else:
         # TODO(rcadene): we download the whole repo here. see if we can avoid this
-        repo_dir = snapshot_download(repo_id, repo_type="dataset", revision=version)
+        safe_version = get_hf_dataset_safe_version(repo_id, version)
+        repo_dir = snapshot_download(repo_id, repo_type="dataset", revision=safe_version)
         path = Path(repo_dir) / "videos"
 
     return path
@@ -354,3 +398,29 @@ def cycle(iterable):
             yield next(iterator)
         except StopIteration:
             iterator = iter(iterable)
+
+
+def create_branch(repo_id, *, branch: str, repo_type: str | None = None):
+    """Create a branch on a existing Hugging Face repo. Delete the branch if it already
+    exists before creating it.
+    """
+    api = HfApi()
+
+    branches = api.list_repo_refs(repo_id, repo_type=repo_type).branches
+    refs = [branch.ref for branch in branches]
+    ref = f"refs/heads/{branch}"
+    if ref in refs:
+        api.delete_branch(repo_id, repo_type=repo_type, branch=branch)
+
+    api.create_branch(repo_id, repo_type=repo_type, branch=branch)
+
+
+def create_lerobot_dataset_card(tags: list | None = None, text: str | None = None) -> DatasetCard:
+    card = DatasetCard(DATASET_CARD_TEMPLATE)
+    card.data.task_categories = ["robotics"]
+    card.data.tags = ["LeRobot"]
+    if tags is not None:
+        card.data.tags += tags
+    if text is not None:
+        card.text += text
+    return card

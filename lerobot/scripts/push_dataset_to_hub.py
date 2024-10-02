@@ -50,12 +50,13 @@ from pathlib import Path
 from typing import Any
 
 import torch
-from huggingface_hub import HfApi, create_branch
+from huggingface_hub import HfApi
 from safetensors.torch import save_file
 
 from lerobot.common.datasets.compute_stats import compute_stats
 from lerobot.common.datasets.lerobot_dataset import CODEBASE_VERSION, LeRobotDataset
-from lerobot.common.datasets.utils import flatten_dict
+from lerobot.common.datasets.push_dataset_to_hub.utils import check_repo_id
+from lerobot.common.datasets.utils import create_branch, create_lerobot_dataset_card, flatten_dict
 
 
 def get_from_raw_to_lerobot_format_fn(raw_format: str):
@@ -65,6 +66,8 @@ def get_from_raw_to_lerobot_format_fn(raw_format: str):
         from lerobot.common.datasets.push_dataset_to_hub.umi_zarr_format import from_raw_to_lerobot_format
     elif raw_format == "aloha_hdf5":
         from lerobot.common.datasets.push_dataset_to_hub.aloha_hdf5_format import from_raw_to_lerobot_format
+    elif "openx_rlds" in raw_format:
+        from lerobot.common.datasets.push_dataset_to_hub.openx_rlds_format import from_raw_to_lerobot_format
     elif raw_format == "dora_parquet":
         from lerobot.common.datasets.push_dataset_to_hub.dora_parquet_format import from_raw_to_lerobot_format
     elif raw_format == "xarm_pkl":
@@ -113,6 +116,14 @@ def push_meta_data_to_hub(repo_id: str, meta_data_dir: str | Path, revision: str
     )
 
 
+def push_dataset_card_to_hub(
+    repo_id: str, revision: str | None, tags: list | None = None, text: str | None = None
+):
+    """Creates and pushes a LeRobotDataset Card with appropriate tags to easily find it on the hub."""
+    card = create_lerobot_dataset_card(tags=tags, text=text)
+    card.push_to_hub(repo_id=repo_id, repo_type="dataset", revision=revision)
+
+
 def push_videos_to_hub(repo_id: str, videos_dir: str | Path, revision: str | None):
     """Expect mp4 files to be all stored in a single "videos" directory.
     On the hugging face repositery, they will be uploaded in a "videos" directory at the root.
@@ -140,22 +151,20 @@ def push_dataset_to_hub(
     num_workers: int = 8,
     episodes: list[int] | None = None,
     force_override: bool = False,
+    resume: bool = False,
     cache_dir: Path = Path("/tmp"),
     tests_data_dir: Path | None = None,
+    encoding: dict | None = None,
 ):
-    # Check repo_id is well formated
-    if len(repo_id.split("/")) != 2:
-        raise ValueError(
-            f"`repo_id` is expected to contain a community or user id `/` the name of the dataset (e.g. 'lerobot/pusht'), but instead contains '{repo_id}'."
-        )
+    check_repo_id(repo_id)
     user_id, dataset_id = repo_id.split("/")
 
     # Robustify when `raw_dir` is str instead of Path
     raw_dir = Path(raw_dir)
     if not raw_dir.exists():
         raise NotADirectoryError(
-            f"{raw_dir} does not exists. Check your paths or run this command to download an existing raw dataset on the hub:"
-            f"python lerobot/common/datasets/push_dataset_to_hub/_download_raw.py --raw-dir your/raw/dir --repo-id your/repo/id_raw"
+            f"{raw_dir} does not exists. Check your paths or run this command to download an existing raw dataset on the hub: "
+            f"`python lerobot/common/datasets/push_dataset_to_hub/_download_raw.py --raw-dir your/raw/dir --repo-id your/repo/id_raw`"
         )
 
     if local_dir:
@@ -173,7 +182,7 @@ def push_dataset_to_hub(
         if local_dir.exists():
             if force_override:
                 shutil.rmtree(local_dir)
-            else:
+            elif not resume:
                 raise ValueError(f"`local_dir` already exists ({local_dir}). Use `--force-override 1`.")
 
         meta_data_dir = local_dir / "meta_data"
@@ -190,9 +199,25 @@ def push_dataset_to_hub(
 
     # convert dataset from original raw format to LeRobot format
     from_raw_to_lerobot_format = get_from_raw_to_lerobot_format_fn(raw_format)
-    hf_dataset, episode_data_index, info = from_raw_to_lerobot_format(
-        raw_dir, videos_dir, fps, video, episodes
-    )
+
+    fmt_kwgs = {
+        "raw_dir": raw_dir,
+        "videos_dir": videos_dir,
+        "fps": fps,
+        "video": video,
+        "episodes": episodes,
+        "encoding": encoding,
+    }
+
+    if "openx_rlds." in raw_format:
+        # Support for official OXE dataset name inside `raw_format`.
+        # For instance, `raw_format="oxe_rlds"` uses the default formating (TODO what does that mean?),
+        # and `raw_format="oxe_rlds.bridge_orig"` uses the brdige_orig formating
+        _, openx_dataset_name = raw_format.split(".")
+        print(f"Converting dataset [{openx_dataset_name}] from 'openx_rlds' to LeRobot format.")
+        fmt_kwgs["openx_dataset_name"] = openx_dataset_name
+
+    hf_dataset, episode_data_index, info = from_raw_to_lerobot_format(**fmt_kwgs)
 
     lerobot_dataset = LeRobotDataset.from_preloaded(
         repo_id=repo_id,
@@ -214,6 +239,7 @@ def push_dataset_to_hub(
     if push_to_hub:
         hf_dataset.push_to_hub(repo_id, revision="main")
         push_meta_data_to_hub(repo_id, meta_data_dir, revision="main")
+        push_dataset_card_to_hub(repo_id, revision="main")
         if video:
             push_videos_to_hub(repo_id, videos_dir, revision="main")
         create_branch(repo_id, repo_type="dataset", branch=CODEBASE_VERSION)
@@ -222,6 +248,7 @@ def push_dataset_to_hub(
         # get the first episode
         num_items_first_ep = episode_data_index["to"][0] - episode_data_index["from"][0]
         test_hf_dataset = hf_dataset.select(range(num_items_first_ep))
+        episode_data_index = {k: v[:1] for k, v in episode_data_index.items()}
 
         test_hf_dataset = test_hf_dataset.with_format(None)
         test_hf_dataset.save_to_disk(str(tests_data_dir / repo_id / "train"))
@@ -259,7 +286,7 @@ def main():
         "--raw-format",
         type=str,
         required=True,
-        help="Dataset type (e.g. `pusht_zarr`, `umi_zarr`, `aloha_hdf5`, `xarm_pkl`, `dora_parquet`).",
+        help="Dataset type (e.g. `pusht_zarr`, `umi_zarr`, `aloha_hdf5`, `xarm_pkl`, `dora_parquet`, `openx_rlds`).",
     )
     parser.add_argument(
         "--repo-id",
@@ -314,9 +341,25 @@ def main():
         help="When set to 1, removes provided output directory if it already exists. By default, raises a ValueError exception.",
     )
     parser.add_argument(
+        "--resume",
+        type=int,
+        default=0,
+        help="When set to 1, resumes a previous run.",
+    )
+    parser.add_argument(
+        "--cache-dir",
+        type=Path,
+        required=False,
+        default="/tmp",
+        help="Directory to store the temporary videos and images generated while creating the dataset.",
+    )
+    parser.add_argument(
         "--tests-data-dir",
         type=Path,
-        help="When provided, save tests artifacts into the given directory for (e.g. `--tests-data-dir tests/data/lerobot/pusht`).",
+        help=(
+            "When provided, save tests artifacts into the given directory "
+            "(e.g. `--tests-data-dir tests/data` will save to tests/data/{--repo-id})."
+        ),
     )
 
     args = parser.parse_args()

@@ -14,10 +14,11 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 import logging
+import os
 import os.path as osp
 import random
 from contextlib import contextmanager
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Generator
 
@@ -25,6 +26,12 @@ import hydra
 import numpy as np
 import torch
 from omegaconf import DictConfig
+
+
+def inside_slurm():
+    """Check whether the python process was launched through slurm"""
+    # TODO(rcadene): return False for interactive mode `--pty bash`
+    return "SLURM_JOB_ID" in os.environ
 
 
 def get_safe_torch_device(cfg_device: str, log: bool = False) -> torch.device:
@@ -172,3 +179,7 @@ def print_cuda_memory_usage():
     print("Maximum GPU Memory Allocated: {:.2f} MB".format(torch.cuda.max_memory_allocated(0) / 1024**2))
     print("Current GPU Memory Reserved: {:.2f} MB".format(torch.cuda.memory_reserved(0) / 1024**2))
     print("Maximum GPU Memory Reserved: {:.2f} MB".format(torch.cuda.max_memory_reserved(0) / 1024**2))
+
+
+def capture_timestamp_utc():
+    return datetime.now(timezone.utc)
