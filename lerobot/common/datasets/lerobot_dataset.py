@@ -406,3 +406,94 @@ class MultiLeRobotDataset(torch.utils.data.Dataset):
             f"  Transformations: {self.image_transforms},\n"
             f")"
         )
+
+
+import numpy as np
+class LeRobotOnlineDataset(torch.utils.data.Dataset):
+    def __init__(
+        self,
+        generate_sample_fn: Callable,
+        features: datasets.Features,
+        num_samples: int = np.inf,
+        info: dict | None = None,
+        stats: dict | None = None,
+        delta_timestamps: dict[list[float]] | None = None,
+    ):
+        super().__init__()
+        self.generate_sample_fn = generate_sample_fn
+        self._features = features
+        self._num_samples = num_samples
+        self.delta_timestamps = delta_timestamps
+        self.stats = stats
+        self.info = info if info is not None else {}
+
+    @property
+    def fps(self) -> int:
+        """Frames per second used during data collection."""
+        return self.info["fps"]
+
+    @property
+    def video(self) -> bool:
+        """Returns True if this dataset loads video frames from mp4 files.
+        Returns False if it only loads images from png files.
+        """
+        return self.info.get("video", False)
+
+    @property
+    def features(self) -> datasets.Features:
+        return self._features
+
+    @property
+    def camera_keys(self) -> list[str]:
+        """Keys to access image and video stream from cameras."""
+        keys = []
+        for key, feats in self.hf_dataset.features.items():
+            if isinstance(feats, (datasets.Image, VideoFrame)):
+                keys.append(key)
+        return keys
+
+    @property
+    def video_frame_keys(self) -> list[str]:
+        """Keys to access video frames that requires to be decoded into images.
+
+        Note: It is empty if the dataset contains images only,
+        or equal to `self.cameras` if the dataset contains videos only,
+        or can even be a subset of `self.cameras` in a case of a mixed image/video dataset.
+        """
+        video_frame_keys = []
+        for key, feats in self.hf_dataset.features.items():
+            if isinstance(feats, VideoFrame):
+                video_frame_keys.append(key)
+        return video_frame_keys
+
+    @property
+    def num_samples(self) -> int:
+        """Number of samples/frames."""
+        return self._num_samples
+
+    @property
+    def num_episodes(self) -> int:
+        """Number of episodes."""
+        return self._num_samples  # each sample is an episode
+
+    @property
+    def tolerance_s(self) -> float:
+        """Tolerance in seconds used to discard loaded frames when their timestamps
+        are not close enough from the requested frames. It is only used when `delta_timestamps`
+        is provided or when loading video frames from mp4 files.
+        """
+        # 1e-4 to account for possible numerical error
+        return 1 / self.fps - 1e-4
+
+    def __len__(self):
+        return self.num_samples
+
+    def __getitem__(self, idx):
+        item = self.generate_sample_fn(idx)
+
+        if self.delta_timestamps is None:
+            # remove the time dim
+            for key in item:
+                if isinstance(item[key], torch.Tensor):
+                    item[key] = item[key][0]
+        return item

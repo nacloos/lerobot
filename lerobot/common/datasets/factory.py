@@ -79,13 +79,115 @@ def make_dataset(cfg, split: str = "train") -> LeRobotDataset | MultiLeRobotData
         from lerobot.common.datasets.compute_stats import compute_stats
 
         fps = cfg.fps
-        horizon = cfg.policy.horizon
-        n_obs_steps = cfg.policy.n_obs_steps
-        delta_timestamps = {}
-        delta_timestamps["observation.image"] = [i / fps for i in range(1 - n_obs_steps, 1)]
-        delta_timestamps["observation.state"] = [i / fps for i in range(1 - n_obs_steps, 1)]
-        delta_timestamps["action"] =[i / fps for i in range(1 - n_obs_steps, 1 - n_obs_steps + horizon)]
 
+        if cfg.policy.name == "diffusion":
+            horizon = cfg.policy.horizon
+            n_obs_steps = cfg.policy.n_obs_steps
+            delta_timestamps = {}
+            delta_timestamps["observation.image"] = [i / fps for i in range(1 - n_obs_steps, 1)]
+            delta_timestamps["observation.state"] = [i / fps for i in range(1 - n_obs_steps, 1)]
+            delta_timestamps["action"] =[i / fps for i in range(1 - n_obs_steps, 1 - n_obs_steps + horizon)]
+        else:
+            raise NotImplementedError
+
+        
+        if cfg.dataset.get("online", False):
+            assert cfg.env.name == "maze"
+
+            from torchvision import transforms
+            from lerobot.common.datasets.lerobot_dataset import LeRobotOnlineDataset
+            from efficient_routing import make
+            from efficient_routing.exp.maze.generate_data import optimal_path
+
+            env_id = cfg.env.task
+            obs_size = (cfg.env.image_size, cfg.env.image_size)
+            episode_length = cfg.dataset.episode_length
+            # not really the number of samples since online dataset is infinite
+            num_samples = cfg.dataset.total_episodes
+
+            env = make(f"env/{env_id}", params=None, obs_size=obs_size)
+
+            def _generate_sample(idx):
+                # TODO: cases where there is no path
+                path = None
+                while path is None:
+                    state = env.reset()
+                    path = optimal_path(state.grid, state.start_pos, state.goal_pos, obs_size, episode_length+1, path_upsample=4)
+                
+                img = env.render(state)  # image is constont over time
+                states = path[:-1]  # state is current position
+                actions = path[1:]  # action is next position
+
+                obs_img = transforms.ToTensor()(img)
+                # expand along time dimension
+                obs_img = obs_img[None].expand(n_obs_steps, -1, -1, -1)  # (n_obs_steps, C, H, W)
+                obs_state = torch.Tensor(states[:n_obs_steps])
+                tgt_action = torch.Tensor(actions)
+
+                assert obs_img.shape == (2, 3, 96, 96)
+                assert obs_state.shape == (2, 2)
+                assert tgt_action.shape == (104, 2)
+
+                return {
+                    "observation.image": obs_img,
+                    "observation.state": obs_state,
+                    "action": tgt_action,
+                    "action_is_pad": torch.full(tgt_action.shape, False),  # same shape as tgt action
+                    "index": idx
+                }
+
+            from datasets.features import Features, Image, Sequence, Value
+
+            features = {}
+            features["observation.image"] = Image()
+            features["observation.state"] = Sequence(length=2, feature=Value(dtype="float32"))
+            features["action"] = Sequence(length=2, feature=Value(dtype="float32"))
+            # features["episode_index"] = Value(dtype="int64", id=None)
+            # features["frame_index"] = Value(dtype="int64", id=None)
+            # features["timestamp"] = Value(dtype="float32", id=None)
+            # features["next.reward"] = Value(dtype="float32", id=None)
+            # features["next.done"] = Value(dtype="bool", id=None)
+            # features["next.success"] = Value(dtype="bool", id=None)
+            features["index"] = Value(dtype="int64", id=None)
+            features = Features(features)
+
+
+            # TODO: can't use online dataset to compute stats because of assert in compute_stats (line 136)
+            # temp_dataset = LeRobotOnlineDataset(
+            #     generate_sample_fn=_generate_sample,
+            #     features=features,
+            #     num_samples=num_samples,
+            # )
+            # # TODO: requires dataset.features!!
+            # stats = compute_stats(temp_dataset, 32, 1)
+
+            from efficient_routing.exp.maze.generate_data import generate_maze_data
+            data_dict, episode_data_index = generate_maze_data(
+                env_id=cfg.env.task,
+                agent_id="astar",
+                total_episodes=32,
+                episode_length=cfg.dataset.episode_length,
+                obs_size=(cfg.env.image_size, cfg.env.image_size),
+                fps=fps
+            )
+            hf_dataset = data_dict_to_hf(data_dict)
+            info = {"fps": fps}
+            temp_dataset = LeRobotDataset.from_preloaded(
+                hf_dataset=hf_dataset,
+                episode_data_index=episode_data_index
+            )
+            stats = compute_stats(temp_dataset, 32, 8)
+
+
+            dataset = LeRobotOnlineDataset(
+                generate_sample_fn=_generate_sample,
+                features=features,
+                num_samples=num_samples,
+                delta_timestamps=delta_timestamps,
+                stats=stats
+            )
+
+            return dataset
 
         # TODO: caching
         print("Generating data...")
@@ -111,16 +213,18 @@ def make_dataset(cfg, split: str = "train") -> LeRobotDataset | MultiLeRobotData
                 fps=fps
             )
 
-        print("Data generated.")
+        print("Data generated. Convert to HF dataset.")
 
         hf_dataset = data_dict_to_hf(data_dict)
         info = {"fps": fps}
 
-        # create dataset without delta_timesteps to compute stats (compute_stats function doesn't expect an additional dim for observation horizon)
+        print("Done. Convert to LeRobotDataset.")
+        # create dataset without delta_timesteps to compute stats (compute_stats function doesn't expect an additional dim for time)
         temp_dataset = LeRobotDataset.from_preloaded(
             hf_dataset=hf_dataset,
             episode_data_index=episode_data_index
         )
+        # breakpoint()
         stats = compute_stats(temp_dataset, 32, 8)
 
         dataset = LeRobotDataset.from_preloaded(

@@ -31,18 +31,19 @@ def make_env(cfg: DictConfig, n_envs: int | None = None) -> gym.vector.VectorEnv
     if cfg.env.name in ["foraging", "maze"]:
         if cfg.env.name == "foraging":
             from efficient_routing.exp.foraging.envs import GymEnv
-            _env = GymEnv(cfg.env.task)
+            _make_env = lambda: GymEnv(cfg.env.task)
 
         elif cfg.env.name == "maze":
             from efficient_routing.exp.maze.generate_data import GymMazeEnv
-            _env = GymMazeEnv()
+            _make_env = lambda: GymMazeEnv(cfg.env.task)
 
         # batched version of the env that returns an observation of shape (b, c)
         env_cls = gym.vector.AsyncVectorEnv if cfg.eval.use_async_envs else gym.vector.SyncVectorEnv
         env = env_cls(
             [
+                # make sure a new env is created each time
                 # lambda: gym.make(gym_handle, disable_env_checker=True, **gym_kwgs)
-                lambda: _env
+                _make_env
                 for _ in range(n_envs if n_envs is not None else cfg.eval.batch_size)
             ]
         )

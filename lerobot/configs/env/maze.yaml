@@ -9,7 +9,7 @@ env:
   state_dim: 2
   action_dim: 2
   fps: ${fps}
-  episode_length: 300
+  episode_length: 104
   gym:
     obs_type: pixels_agent_pos
     render_mode: rgb_array
