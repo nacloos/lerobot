@@ -75,7 +75,7 @@ def make_dataset(cfg, split: str = "train") -> LeRobotDataset | MultiLeRobotData
 
     # TODO: temp
     if cfg.env.name in ["foraging", "maze"]:
-        from efficient_routing.exp.foraging.generate_data import data_dict_to_hf
+        from diffusion_memory.exp.foraging.generate_data import data_dict_to_hf
         from lerobot.common.datasets.compute_stats import compute_stats
 
         fps = cfg.fps
@@ -193,7 +193,7 @@ def make_dataset(cfg, split: str = "train") -> LeRobotDataset | MultiLeRobotData
         print("Generating data...")
 
         if cfg.env.name == "foraging":
-            from efficient_routing.exp.foraging.generate_data import generate_data
+            from diffusion_memory.exp.foraging.generate_data import generate_data
             data_dict, episode_data_index = generate_data(
                 env_id=cfg.env.task,
                 agent_id=cfg.env.task,

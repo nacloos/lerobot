@@ -30,7 +30,7 @@ def make_env(cfg: DictConfig, n_envs: int | None = None) -> gym.vector.VectorEnv
     # TODO: temp
     if cfg.env.name in ["foraging", "maze"]:
         if cfg.env.name == "foraging":
-            from efficient_routing.exp.foraging.envs import GymEnv
+            from diffusion_memory.exp.foraging.envs import GymEnv
             _make_env = lambda: GymEnv(cfg.env.task)
 
         elif cfg.env.name == "maze":
