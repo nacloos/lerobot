@@ -1,3 +1,21 @@
+#!/usr/bin/env python
+
+# Copyright 2024 Seungjae Lee and Yibin Wang and Haritheja Etukuru
+# and H. Jin Kim and Nur Muhammad Mahi Shafiullah and Lerrel Pinto
+# and The HuggingFace Inc. team. All rights reserved.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
 import math
 import warnings
 from collections import deque
@@ -20,7 +38,13 @@ from lerobot.common.policies.vqbet.vqbet_utils import GPT, ResidualVQ
 # ruff: noqa: N806
 
 
-class VQBeTPolicy(nn.Module, PyTorchModelHubMixin):
+class VQBeTPolicy(
+    nn.Module,
+    PyTorchModelHubMixin,
+    library_name="lerobot",
+    repo_url="https://github.com/huggingface/lerobot",
+    tags=["robotics", "vqbet"],
+):
     """
     VQ-BeT Policy as per "Behavior Generation with Latent Actions"
     """
@@ -80,6 +104,7 @@ class VQBeTPolicy(nn.Module, PyTorchModelHubMixin):
         """
 
         batch = self.normalize_inputs(batch)
+        batch = dict(batch)  # shallow copy so that adding a key doesn't modify the original
         batch["observation.images"] = torch.stack([batch[k] for k in self.expected_image_keys], dim=-4)
         # Note: It's important that this happens after stacking the images into a single key.
         self._queues = populate_queues(self._queues, batch)
@@ -105,6 +130,7 @@ class VQBeTPolicy(nn.Module, PyTorchModelHubMixin):
     def forward(self, batch: dict[str, Tensor]) -> dict[str, Tensor]:
         """Run the batch through the model and compute the loss for training or validation."""
         batch = self.normalize_inputs(batch)
+        batch = dict(batch)  # shallow copy so that adding a key doesn't modify the original
         batch["observation.images"] = torch.stack([batch[k] for k in self.expected_image_keys], dim=-4)
         batch = self.normalize_targets(batch)
         # VQ-BeT discretizes action using VQ-VAE before training BeT (please refer to section 3.2 in the VQ-BeT paper https://arxiv.org/pdf/2403.03181)
@@ -269,7 +295,7 @@ class VQBeTModel(nn.Module):
 
         # To input state and observation features into GPT layers, we first project the features to fit the shape of input size of GPT.
         self.state_projector = MLP(
-            config.output_shapes["action"][0], hidden_channels=[self.config.gpt_input_dim]
+            config.input_shapes["observation.state"][0], hidden_channels=[self.config.gpt_input_dim]
         )
         self.rgb_feature_projector = MLP(
             self.rgb_encoder.feature_dim, hidden_channels=[self.config.gpt_input_dim]
@@ -280,7 +306,8 @@ class VQBeTModel(nn.Module):
         # bin prediction head / offset prediction head part of VQ-BeT
         self.action_head = VQBeTHead(config)
 
-        num_tokens = self.config.n_action_pred_token + self.config.action_chunk_size - 1
+        # Action tokens for: each observation step, the current action token, and all future action tokens.
+        num_tokens = self.config.n_action_pred_token + self.config.n_obs_steps - 1
         self.register_buffer(
             "select_target_actions_indices",
             torch.row_stack([torch.arange(i, i + self.config.action_chunk_size) for i in range(num_tokens)]),
@@ -323,17 +350,22 @@ class VQBeTModel(nn.Module):
 
         # get action features (pass through GPT)
         features = self.policy(input_tokens)
-        # len(self.config.input_shapes) is the number of different observation modes. this line gets the index of action prompt tokens.
+        # len(self.config.input_shapes) is the number of different observation modes.
+        # this line gets the index of action prompt tokens.
         historical_act_pred_index = np.arange(0, n_obs_steps) * (len(self.config.input_shapes) + 1) + len(
             self.config.input_shapes
         )
 
         # only extract the output tokens at the position of action query:
-        # Behavior Transformer (BeT), and VQ-BeT are both sequence-to-sequence prediction models, mapping sequential observation to sequential action (please refer to section 2.2 in BeT paper https://arxiv.org/pdf/2206.11251).
-        # Thus, it predict historical action sequence, in addition to current and future actions (predicting future actions : optional).
-        features = torch.cat(
-            [features[:, historical_act_pred_index], features[:, -len_additional_action_token:]], dim=1
-        )
+        # Behavior Transformer (BeT), and VQ-BeT are both sequence-to-sequence prediction models,
+        # mapping sequential observation to sequential action (please refer to section 2.2 in BeT paper https://arxiv.org/pdf/2206.11251).
+        # Thus, it predicts a historical action sequence, in addition to current and future actions (predicting future actions : optional).
+        if len_additional_action_token > 0:
+            features = torch.cat(
+                [features[:, historical_act_pred_index], features[:, -len_additional_action_token:]], dim=1
+            )
+        else:
+            features = features[:, historical_act_pred_index]
         # pass through action head
         action_head_output = self.action_head(features)
         # if rollout, VQ-BeT don't calculate loss
