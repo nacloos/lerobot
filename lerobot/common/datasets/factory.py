@@ -194,9 +194,10 @@ def make_dataset(cfg, split: str = "train") -> LeRobotDataset | MultiLeRobotData
 
         if cfg.env.name == "foraging":
             from diffusion_memory.exp.foraging.generate_data import generate_data
+            agent_id = cfg.env.get("agent", cfg.env.task)
             data_dict, episode_data_index = generate_data(
                 env_id=cfg.env.task,
-                agent_id=cfg.env.task,
+                agent_id=agent_id,
                 total_episodes=cfg.dataset.total_episodes,
                 episode_length=cfg.dataset.episode_length,
                 fps=fps
