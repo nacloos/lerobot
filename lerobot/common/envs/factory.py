@@ -31,6 +31,7 @@ def make_env(cfg: DictConfig, n_envs: int | None = None) -> gym.vector.VectorEnv
     if cfg.env.name in ["foraging", "maze"]:
         if cfg.env.name == "foraging":
             from diffusion_memory.exp.foraging.envs import GymEnv
+            import diffusion_memory.envs.flipflop
             _make_env = lambda: GymEnv(cfg.env.task)
 
         elif cfg.env.name == "maze":
