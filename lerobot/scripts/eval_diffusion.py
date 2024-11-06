@@ -462,15 +462,19 @@ def _compile_episode_data(
     return data_dict
 
 
-def analyze_episodes(episodes, out_dir):
+def analyze_episodes(episodes, out_dir, max_episodes_rendered=20, plot_endpoint_barchart=False):
     import matplotlib.pyplot as plt
 
     fig_dir = Path(out_dir) / "figures"
     fig_dir.mkdir(parents=True, exist_ok=True)
     # episodes.keys(): 'action', 'episode_index', 'frame_index', 'timestamp', 'next.done', 'next.success', 'next.reward', 'observation.image', 'observation.state', 'index'
     episode_index = episodes["episode_index"]
+    n_episodes_rendered_so_far = 0
 
     for episode_idx in episode_index.unique():
+        if n_episodes_rendered_so_far >= max_episodes_rendered:
+            break
+        
         _fig_dir = fig_dir / ("episode_" + str(episode_idx.item()))
         _fig_dir.mkdir(parents=True, exist_ok=True)
 
@@ -491,7 +495,31 @@ def analyze_episodes(episodes, out_dir):
         plt.xlabel("Time (s)")
         plt.ylabel("Position")
         plt.savefig(Path(_fig_dir) / "observation_state.png")
+        
+        n_episodes_rendered_so_far += 1
 
+    if plot_endpoint_barchart:
+        # Calculate distance to each of the four endpoints:
+        endpoints = np.array([[-0.5, 0], # left
+                                [0.5, 0], # right
+                                [0, 0.5], # top
+                                [0, -0.5]]) # bottom
+        closest_endpoint_count = [0] * 5
+        
+        for episode_idx in episode_index.unique():
+            obs_state = episodes["observation.state"][episode_index == episode_idx]
+            last_state = obs_state[-1].detach().numpy()
+            dists = np.linalg.norm(last_state - endpoints, axis=-1)
+            closest_index = np.argmin(dists)
+            if dists[closest_index] >= 0.2:
+                closest_index = 4 # means it is close to none of them
+            closest_endpoint_count[closest_index] += 1
+        
+        plt.figure()
+        plt.bar(["left", "right", "top", "bottom", "none"], closest_endpoint_count)
+        plt.xlabel("Closest endpoint")
+        plt.ylabel("Count")
+        plt.savefig(Path(fig_dir) / "endpoint_frequency.png")
 
 
 def main(
@@ -541,6 +569,8 @@ def main(
     assert isinstance(policy, nn.Module)
     policy.eval()
 
+    # TODO: Make into eval param
+    max_episodes_rendered = 20
 
     episodes_dir = Path(out_dir) / "episodes"
     episodes_dir.mkdir(parents=True, exist_ok=True)
@@ -551,8 +581,7 @@ def main(
                 env,
                 policy,
                 hydra_cfg.eval.n_episodes,
-                # 1,
-                max_episodes_rendered=20,
+                max_episodes_rendered=max_episodes_rendered,
                 videos_dir=Path(out_dir) / "videos",
                 start_seed=hydra_cfg.seed,
                 return_episode_data=True
@@ -571,7 +600,8 @@ def main(
 
     env.close()
 
-    analyze_episodes(episodes, out_dir)
+    plot_endpoint_barchart = hydra_cfg.env['task'] == 'straight_lines-4_directions'
+    analyze_episodes(episodes, out_dir, max_episodes_rendered=max_episodes_rendered, plot_endpoint_barchart=plot_endpoint_barchart)
 
     logging.info("End of eval")
 
