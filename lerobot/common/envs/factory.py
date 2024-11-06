@@ -24,15 +24,15 @@ def make_env(cfg: DictConfig, n_envs: int | None = None) -> gym.vector.VectorEnv
 
     n_envs can be used to override eval.batch_size in the configuration. Must be at least 1.
     """
+
     if n_envs is not None and n_envs < 1:
         raise ValueError("`n_envs must be at least 1")
-
     # TODO: temp
     if cfg.env.name in ["foraging", "maze"]:
         if cfg.env.name == "foraging":
             from diffusion_memory.exp.foraging.envs import GymEnv
             import diffusion_memory.envs.flipflop
-            _make_env = lambda: GymEnv(cfg.env.task)
+            _make_env = lambda: GymEnv(cfg.env.task, **cfg.env.gym)
 
         elif cfg.env.name == "maze":
             from efficient_routing.exp.maze.generate_data import GymMazeEnv

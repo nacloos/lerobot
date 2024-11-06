@@ -492,7 +492,6 @@ def analyze_episodes(episodes, out_dir):
         plt.ylabel("Position")
         plt.savefig(Path(_fig_dir) / "observation_state.png")
 
-    breakpoint()
 
 
 def main(
@@ -551,9 +550,9 @@ def main(
             info = eval_policy(
                 env,
                 policy,
-                # hydra_cfg.eval.n_episodes,
-                1,
-                max_episodes_rendered=10,
+                hydra_cfg.eval.n_episodes,
+                # 1,
+                max_episodes_rendered=20,
                 videos_dir=Path(out_dir) / "videos",
                 start_seed=hydra_cfg.seed,
                 return_episode_data=True
