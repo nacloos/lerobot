@@ -68,7 +68,7 @@ from lerobot.common.envs.utils import preprocess_observation
 from lerobot.common.logger import log_output_dir
 from lerobot.common.policies.factory import make_policy
 from lerobot.common.policies.policy_protocol import Policy
-from lerobot.common.policies.utils import get_device_from_parameters
+from lerobot.common.policies.utils import get_device_from_parameters, get_dtype_from_parameters
 from lerobot.common.utils.io_utils import write_video
 from lerobot.common.utils.utils import (
     get_safe_torch_device,
@@ -77,6 +77,7 @@ from lerobot.common.utils.utils import (
     inside_slurm,
     set_global_seed,
 )
+
 
 
 def rollout(
@@ -132,6 +133,8 @@ def rollout(
     all_rewards = []
     all_successes = []
     all_dones = []
+    # Modified: keep track of the samples generated during the diffusion
+    all_samples = []
 
     step = 0
     # Keep track of which environments are done.
@@ -177,6 +180,8 @@ def rollout(
         all_rewards.append(torch.from_numpy(reward))
         all_dones.append(torch.from_numpy(done))
         all_successes.append(torch.tensor(successes))
+        # Modified
+        all_samples.append(torch.tensor(policy.diffusion.samples))
 
         step += 1
         running_success_rate = (
@@ -196,6 +201,8 @@ def rollout(
         "reward": torch.stack(all_rewards, dim=1),
         "success": torch.stack(all_successes, dim=1),
         "done": torch.stack(all_dones, dim=1),
+        # Modified
+        "diffusion_samples": torch.stack(all_samples, dim=1),
     }
     if return_observations:
         stacked_observations = {}
@@ -442,6 +449,9 @@ def _compile_episode_data(
             "next.done": rollout_data["done"][ep_ix, : num_frames - 1],
             "next.success": rollout_data["success"][ep_ix, : num_frames - 1],
             "next.reward": rollout_data["reward"][ep_ix, : num_frames - 1].type(torch.float32),
+
+            # Modified
+            "diffusion_samples": rollout_data["diffusion_samples"][ep_ix, : num_frames - 1],
         }
 
         # For the last observation frame, all other keys will just be copy padded.
@@ -459,11 +469,72 @@ def _compile_episode_data(
 
     data_dict["index"] = torch.arange(start_data_index, start_data_index + total_frames, 1)
 
+    # Modified: add diffusion samples
+    data_dict["diffusion_samples"] = rollout_data["diffusion_samples"]
+
     return data_dict
+
+
+def conditional_sample(
+    self, batch_size: int, global_cond: Tensor | None = None, generator: torch.Generator | None = None
+) -> Tensor:
+    """
+    Modified version of DiffusionModel.conditional_sample that saves the samples generated during the difussion. Useful for visualizing the diffusion process.
+    """
+    device = get_device_from_parameters(self)
+    dtype = get_dtype_from_parameters(self)
+
+    # Sample prior.
+    sample = torch.randn(
+        size=(batch_size, self.config.horizon, self.config.output_shapes["action"][0]),
+        dtype=dtype,
+        device=device,
+        generator=generator,
+    )
+
+    self.noise_scheduler.set_timesteps(self.num_inference_steps)
+
+    samples = []  # Modified to save the samples
+
+    for t in self.noise_scheduler.timesteps:
+        # Predict model output.
+        model_output = self.unet(
+            sample,
+            torch.full(sample.shape[:1], t, dtype=torch.long, device=sample.device),
+            global_cond=global_cond,
+        )
+        # Compute previous image: x_t -> x_t-1
+        sample = self.noise_scheduler.step(model_output, t, sample, generator=generator).prev_sample
+
+        # Modified
+        samples.append(sample.clone().detach().cpu())
+
+    # import matplotlib.pyplot as plt
+    # from matplotlib.animation import FuncAnimation
+    # fig, ax = plt.subplots()
+    # scatter = ax.scatter(samples[0][0, :, 0], samples[0][0, :, 1])
+
+    # def update(frame_number):
+    #     scatter.set_offsets(samples[frame_number][0, :, :2])
+    #     return scatter,
+    # from matplotlib.animation import FuncAnimation, PillowWriter
+    # ani = FuncAnimation(fig, update, frames=len(samples), blit=True)
+    # writer = PillowWriter(fps=15)  # Adjust fps as needed
+    # ani.save("trajectory_animation.gif", writer=writer)
+
+    # Modified: save samples as attribute (so that don't change the interface)
+    samples = torch.stack(samples)  # diffusion_steps x batch_size x horizon x action_dim
+    # transpose to have batch_size as first dim (to be consistent with the other rollout_data)
+    self.samples = samples.transpose(0, 1)  # batch_size x diffusion_steps x horizon x action_dim
+
+    return sample
+
 
 
 def analyze_episodes(episodes, out_dir):
     import matplotlib.pyplot as plt
+    from matplotlib.animation import FuncAnimation, PillowWriter
+    import matplotlib.cm as cm
 
     fig_dir = Path(out_dir) / "figures"
     fig_dir.mkdir(parents=True, exist_ok=True)
@@ -483,15 +554,56 @@ def analyze_episodes(episodes, out_dir):
         plt.plot(t, action[:, 1])
         plt.xlabel("Time (s)")
         plt.ylabel("Action")
-        plt.savefig(Path(_fig_dir) / "action.png")
+        plt.savefig(_fig_dir / "action.png")
 
         plt.figure()
         plt.plot(t, obs_state[:, 0])
         plt.plot(t, obs_state[:, 1])
         plt.xlabel("Time (s)")
         plt.ylabel("Position")
-        plt.savefig(Path(_fig_dir) / "observation_state.png")
+        plt.savefig(_fig_dir / "observation_state.png")
 
+
+        # animate diffusion samples
+        # diffusion_samples tensor has different shape than the other tensors because didn't concat in the _compile_episode_data
+        # shape: n_episodes x n_rollouts x n_diffusion_steps x horizon x action_dim
+        samples = episodes["diffusion_samples"][episode_idx]
+        # animate the diffusion for the first rollout (from the initial position of the agent)
+        samples = samples[0]
+        samples = samples[80:]
+        breakpoint()
+
+        num_points = samples.shape[1]
+        color_indices = np.linspace(0, 1, num_points)
+        colors = cm.viridis(color_indices)  # Replace 'viridis' with your desired colormap
+
+        fig = plt.figure()
+        plt.axis('equal')
+        plt.axis('off')
+        scatter = plt.scatter(samples[0, :, 0], samples[0, :, 1], c=colors)
+
+        # origin
+        plt.scatter([0], [0], marker="o", edgecolor='black', facecolor='none')
+
+        # target positions
+        target_positions = np.array([
+            [0.5, 0.0],
+            [-0.5, 0.0],
+            [0.0, 0.5],
+            [0.0, -0.5],
+        ])
+
+        for pos in target_positions:
+            plt.scatter(pos[0], pos[1], marker='o', edgecolor='black', facecolor='none')
+
+
+        def update(frame_number):
+            scatter.set_offsets(samples[frame_number, :, :2])
+            return scatter,
+        
+        ani = FuncAnimation(fig, update, frames=len(samples), blit=True)
+        writer = PillowWriter(fps=15)
+        ani.save(_fig_dir / "diffusion_samples.gif", writer=writer)
 
 
 def main(
@@ -540,6 +652,9 @@ def main(
 
     assert isinstance(policy, nn.Module)
     policy.eval()
+
+    # modfiy the policy to save the samples generated during the diffusion
+    policy.diffusion.conditional_sample = conditional_sample.__get__(policy.diffusion)
 
 
     episodes_dir = Path(out_dir) / "episodes"
