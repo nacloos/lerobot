@@ -180,8 +180,11 @@ def rollout(
         all_rewards.append(torch.from_numpy(reward))
         all_dones.append(torch.from_numpy(done))
         all_successes.append(torch.tensor(successes))
-        # Modified
-        all_samples.append(torch.tensor(policy.diffusion.samples))
+
+        # Modified: get the generated samples and unnormalize them
+        samples = torch.tensor(policy.diffusion.samples)
+        samples = policy.unnormalize_outputs({"action": samples})["action"]
+        all_samples.append(samples.to("cpu"))
 
         step += 1
         running_success_rate = (
@@ -449,9 +452,6 @@ def _compile_episode_data(
             "next.done": rollout_data["done"][ep_ix, : num_frames - 1],
             "next.success": rollout_data["success"][ep_ix, : num_frames - 1],
             "next.reward": rollout_data["reward"][ep_ix, : num_frames - 1].type(torch.float32),
-
-            # Modified
-            "diffusion_samples": rollout_data["diffusion_samples"][ep_ix, : num_frames - 1],
         }
 
         # For the last observation frame, all other keys will just be copy padded.
@@ -507,7 +507,7 @@ def conditional_sample(
         sample = self.noise_scheduler.step(model_output, t, sample, generator=generator).prev_sample
 
         # Modified
-        samples.append(sample.clone().detach().cpu())
+        samples.append(sample.clone().detach())
 
     # import matplotlib.pyplot as plt
     # from matplotlib.animation import FuncAnimation
@@ -566,31 +566,6 @@ def analyze_episodes(episodes, out_dir, max_episodes_rendered=20, plot_endpoint_
         plt.xlabel("Time (s)")
         plt.ylabel("Position")
         plt.savefig(Path(_fig_dir) / "observation_state.png")
-        
-        n_episodes_rendered_so_far += 1
-
-    if plot_endpoint_barchart:
-        # Calculate distance to each of the four endpoints:
-        endpoints = np.array([[-0.5, 0], # left
-                                [0.5, 0], # right
-                                [0, 0.5], # top
-                                [0, -0.5]]) # bottom
-        closest_endpoint_count = [0] * 5
-        
-        for episode_idx in episode_index.unique():
-            obs_state = episodes["observation.state"][episode_index == episode_idx]
-            last_state = obs_state[-1].detach().numpy()
-            dists = np.linalg.norm(last_state - endpoints, axis=-1)
-            closest_index = np.argmin(dists)
-            if dists[closest_index] >= 0.2:
-                closest_index = 4 # means it is close to none of them
-            closest_endpoint_count[closest_index] += 1
-        
-        plt.figure()
-        plt.bar(["left", "right", "top", "bottom", "none"], closest_endpoint_count)
-        plt.xlabel("Closest endpoint")
-        plt.ylabel("Count")
-        plt.savefig(Path(fig_dir) / "endpoint_frequency.png")
 
         # animate diffusion samples
         # diffusion_samples tensor has different shape than the other tensors because didn't concat in the _compile_episode_data
@@ -599,7 +574,6 @@ def analyze_episodes(episodes, out_dir, max_episodes_rendered=20, plot_endpoint_
         # animate the diffusion for the first rollout (from the initial position of the agent)
         samples = samples[0]
         samples = samples[80:]
-        breakpoint()
 
         num_points = samples.shape[1]
         color_indices = np.linspace(0, 1, num_points)
@@ -630,8 +604,70 @@ def analyze_episodes(episodes, out_dir, max_episodes_rendered=20, plot_endpoint_
             return scatter,
         
         ani = FuncAnimation(fig, update, frames=len(samples), blit=True)
-        writer = PillowWriter(fps=15)
+        writer = PillowWriter(fps=30)
         ani.save(_fig_dir / "diffusion_samples.gif", writer=writer)
+
+        n_episodes_rendered_so_far += 1
+
+
+    if plot_endpoint_barchart:
+        # Calculate distance to each of the four endpoints:
+        endpoints = np.array([[-0.5, 0], # left
+                                [0.5, 0], # right
+                                [0, 0.5], # top
+                                [0, -0.5]]) # bottom
+        closest_endpoint_count = [0] * 5
+        
+        for episode_idx in episode_index.unique():
+            obs_state = episodes["observation.state"][episode_index == episode_idx]
+            last_state = obs_state[-1].detach().numpy()
+            dists = np.linalg.norm(last_state - endpoints, axis=-1)
+            closest_index = np.argmin(dists)
+            if dists[closest_index] >= 0.2:
+                closest_index = 4 # means it is close to none of them
+            closest_endpoint_count[closest_index] += 1
+        
+        plt.figure()
+        plt.bar(["left", "right", "top", "bottom", "none"], closest_endpoint_count)
+        plt.xlabel("Closest endpoint")
+        plt.ylabel("Count")
+        plt.savefig(fig_dir / "endpoint_frequency.png")
+
+
+    # dim reduction on the diffusion samples
+    samples = episodes["diffusion_samples"]  # shape: n_episodes x n_rollouts x n_diffusion_steps x horizon x action_dim
+    n_episodes = samples.shape[0]
+    n_diffusion_steps = samples.shape[2]
+
+    samples = samples[:, 0]  # only consider the first rollout
+    # samples = samples[:, 80:]
+    samples = samples.reshape(-1, samples.shape[-2]*samples.shape[-1])  # last dim = horizon x action_dim
+
+    colors = cm.viridis(np.linspace(0, 1, n_diffusion_steps))
+
+    from sklearn.decomposition import PCA
+    pca = PCA(n_components=2)
+    pca_samples = pca.fit_transform(samples)
+    pca_samples = pca_samples.reshape(n_episodes, n_diffusion_steps, 2)
+
+    plt.figure(figsize=(4, 4), dpi=300)
+    for episode_idx in range(n_episodes):
+        plt.scatter(pca_samples[episode_idx, :, 0], pca_samples[episode_idx, :, 1], c=colors, marker=".")
+    plt.axis('off')
+    plt.axis('equal')
+    plt.savefig(fig_dir / "diffusion_samples_pca.png")
+
+    from sklearn.manifold import MDS
+    mds = MDS(n_components=2)
+    mds_samples = mds.fit_transform(samples)
+    mds_samples = mds_samples.reshape(n_episodes, n_diffusion_steps, 2)
+
+    plt.figure(figsize=(4, 4), dpi=300)
+    for episode_idx in range(n_episodes):
+        plt.scatter(mds_samples[episode_idx, :, 0], mds_samples[episode_idx, :, 1], c=colors, marker=".")
+    plt.axis("off")
+    plt.axis("equal")
+    plt.savefig(fig_dir / "diffusion_samples_mds.png")
 
 
 def main(
