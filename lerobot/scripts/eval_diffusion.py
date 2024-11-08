@@ -494,7 +494,8 @@ def conditional_sample(
 
     self.noise_scheduler.set_timesteps(self.num_inference_steps)
 
-    samples = []  # Modified to save the samples
+    samples = []  # Modified to save the samples (x_t-1)
+    original_samples = []  # Modified to save the predicted original samples (x_0)
 
     for t in self.noise_scheduler.timesteps:
         # Predict model output.
@@ -504,28 +505,21 @@ def conditional_sample(
             global_cond=global_cond,
         )
         # Compute previous image: x_t -> x_t-1
-        sample = self.noise_scheduler.step(model_output, t, sample, generator=generator).prev_sample
+        out = self.noise_scheduler.step(model_output, t, sample, generator=generator)
+        sample = out.prev_sample
 
         # Modified
+        if hasattr(self, "guidance_callback"):
+            sample = self.guidance_callback(sample, t)
+
         samples.append(sample.clone().detach())
-
-    # import matplotlib.pyplot as plt
-    # from matplotlib.animation import FuncAnimation
-    # fig, ax = plt.subplots()
-    # scatter = ax.scatter(samples[0][0, :, 0], samples[0][0, :, 1])
-
-    # def update(frame_number):
-    #     scatter.set_offsets(samples[frame_number][0, :, :2])
-    #     return scatter,
-    # from matplotlib.animation import FuncAnimation, PillowWriter
-    # ani = FuncAnimation(fig, update, frames=len(samples), blit=True)
-    # writer = PillowWriter(fps=15)  # Adjust fps as needed
-    # ani.save("trajectory_animation.gif", writer=writer)
+        original_samples.append(out.pred_original_sample.clone().detach())
 
     # Modified: save samples as attribute (so that don't change the interface)
     samples = torch.stack(samples)  # diffusion_steps x batch_size x horizon x action_dim
     # transpose to have batch_size as first dim (to be consistent with the other rollout_data)
     self.samples = samples.transpose(0, 1)  # batch_size x diffusion_steps x horizon x action_dim
+    self.original_samples = torch.stack(original_samples).transpose(0, 1)
 
     return sample
 
@@ -573,7 +567,7 @@ def analyze_episodes(episodes, out_dir, max_episodes_rendered=20, plot_endpoint_
         samples = episodes["diffusion_samples"][episode_idx]
         # animate the diffusion for the first rollout (from the initial position of the agent)
         samples = samples[0]
-        samples = samples[80:]
+        # samples = samples[80:]
 
         num_points = samples.shape[1]
         color_indices = np.linspace(0, 1, num_points)
@@ -670,6 +664,24 @@ def analyze_episodes(episodes, out_dir, max_episodes_rendered=20, plot_endpoint_
     plt.savefig(fig_dir / "diffusion_samples_mds.png")
 
 
+def target_distance_guidance(model, sample, t):
+    if t < 50:
+        return sample
+
+    target = torch.tensor([0, 0.5], device=sample.device)
+    lambd = 30
+
+    with torch.inference_mode(False):
+        _sample = sample.clone().detach().requires_grad_(True)
+
+        distance = torch.norm(_sample - target, p=2, dim=-1)
+        distance = distance.mean()
+        gradient = torch.autograd.grad(distance, _sample)[0]
+
+    sample = sample - lambd * gradient
+    return sample
+
+
 def main(
     pretrained_policy_path: Path | None = None,
     hydra_cfg_path: str | None = None,
@@ -720,6 +732,9 @@ def main(
     # modfiy the policy to save the samples generated during the diffusion
     policy.diffusion.conditional_sample = conditional_sample.__get__(policy.diffusion)
 
+    # add guidance callback
+    policy.diffusion.guidance_callback = target_distance_guidance.__get__(policy.diffusion)
+
     max_episodes_rendered = 20
 
     episodes_dir = Path(out_dir) / "episodes"
@@ -750,7 +765,7 @@ def main(
 
     env.close()
 
-    plot_endpoint_barchart = hydra_cfg.env['task'] == 'straight_lines-4_directions'
+    plot_endpoint_barchart = 'straight_lines' in hydra_cfg.env['task']
     analyze_episodes(episodes, out_dir, max_episodes_rendered=max_episodes_rendered, plot_endpoint_barchart=plot_endpoint_barchart)
 
     logging.info("End of eval")
