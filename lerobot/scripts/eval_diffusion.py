@@ -154,8 +154,10 @@ def rollout(
 
         observation = {key: observation[key].to(device, non_blocking=True) for key in observation}
 
-        with torch.inference_mode():
-            action = policy.select_action(observation)
+        # TODO: removed this because it is a stronger override on gradients than just
+        # setting no_grad. If this is true then the conditioning doesn't work
+        # with torch.inference_mode():
+        action = policy.select_action(observation)
 
         # Convert to CPU / numpy.
         action = action.to("cpu").numpy()
@@ -483,6 +485,13 @@ def conditional_sample(
     """
     device = get_device_from_parameters(self)
     dtype = get_dtype_from_parameters(self)
+    
+    # TODO: Pass this in properly as a property of the model, or as an eval param.
+    use_heuristic_conditioning = True
+    if use_heuristic_conditioning:
+        torch.set_grad_enabled(True)
+        target = torch.tensor([0, 0.5], device=device)
+        lambd = 30
 
     # Sample prior.
     sample = torch.randn(
@@ -490,6 +499,7 @@ def conditional_sample(
         dtype=dtype,
         device=device,
         generator=generator,
+        requires_grad=use_heuristic_conditioning
     )
 
     self.noise_scheduler.set_timesteps(self.num_inference_steps)
@@ -498,13 +508,34 @@ def conditional_sample(
 
     for t in self.noise_scheduler.timesteps:
         # Predict model output.
-        model_output = self.unet(
-            sample,
-            torch.full(sample.shape[:1], t, dtype=torch.long, device=sample.device),
-            global_cond=global_cond,
-        )
-        # Compute previous image: x_t -> x_t-1
-        sample = self.noise_scheduler.step(model_output, t, sample, generator=generator).prev_sample
+        with torch.no_grad():
+            model_output = self.unet(
+                sample,
+                torch.full(sample.shape[:1], t, dtype=torch.long, device=sample.device),
+                global_cond=global_cond,
+            )
+            
+            # Compute previous image: x_t -> x_t-1
+            prev_sample = self.noise_scheduler.step(model_output, t, sample, generator=generator).prev_sample
+            # prev_sample.requires_grad_(True) 
+        
+        if use_heuristic_conditioning:
+            # Add distance gradient here
+            # Either from all the points or just the target last point
+            # distance = torch.norm(sample[:, -1, :] - target, p=2, dim=-1)
+            distance = torch.norm(sample - target, p=2, dim=-1)
+            distance = distance.mean()
+            distance.backward()
+            
+            grad = sample.grad
+            
+            new_sample = prev_sample - lambd * grad
+            sample.grad.zero_()
+            
+            # Clear gradient and detach sample to avoid graph buildup
+            sample = new_sample.detach().clone().requires_grad_(True)
+        else:
+            sample = prev_sample
 
         # Modified
         samples.append(sample.clone().detach())
@@ -527,11 +558,13 @@ def conditional_sample(
     # transpose to have batch_size as first dim (to be consistent with the other rollout_data)
     self.samples = samples.transpose(0, 1)  # batch_size x diffusion_steps x horizon x action_dim
 
+    torch.set_grad_enabled(False)
+
     return sample
 
 
 
-def analyze_episodes(episodes, out_dir, max_episodes_rendered=20, plot_endpoint_barchart=False):
+def analyze_episodes(episodes, out_dir, max_episodes_rendered=20, plot_endpoint_barchart=False, plot_pca_and_mds=False):
     import matplotlib.pyplot as plt
     from matplotlib.animation import FuncAnimation, PillowWriter
     import matplotlib.cm as cm
@@ -541,6 +574,8 @@ def analyze_episodes(episodes, out_dir, max_episodes_rendered=20, plot_endpoint_
     # episodes.keys(): 'action', 'episode_index', 'frame_index', 'timestamp', 'next.done', 'next.success', 'next.reward', 'observation.image', 'observation.state', 'index'
     episode_index = episodes["episode_index"]
     n_episodes_rendered_so_far = 0
+    
+    logging.info("Plotting observation state and action trajectories.")
 
     for episode_idx in episode_index.unique():
         if n_episodes_rendered_so_far >= max_episodes_rendered:
@@ -611,6 +646,7 @@ def analyze_episodes(episodes, out_dir, max_episodes_rendered=20, plot_endpoint_
 
 
     if plot_endpoint_barchart:
+        logging.info("Plotting endpoint barchart.")
         # Calculate distance to each of the four endpoints:
         endpoints = np.array([[-0.5, 0], # left
                                 [0.5, 0], # right
@@ -645,29 +681,32 @@ def analyze_episodes(episodes, out_dir, max_episodes_rendered=20, plot_endpoint_
 
     colors = cm.viridis(np.linspace(0, 1, n_diffusion_steps))
 
-    from sklearn.decomposition import PCA
-    pca = PCA(n_components=2)
-    pca_samples = pca.fit_transform(samples)
-    pca_samples = pca_samples.reshape(n_episodes, n_diffusion_steps, 2)
+    if plot_pca_and_mds:
+        logging.info("Plotting PCA of diffusion samples.")
+        from sklearn.decomposition import PCA
+        pca = PCA(n_components=2)
+        pca_samples = pca.fit_transform(samples)
+        pca_samples = pca_samples.reshape(n_episodes, n_diffusion_steps, 2)
 
-    plt.figure(figsize=(4, 4), dpi=300)
-    for episode_idx in range(n_episodes):
-        plt.scatter(pca_samples[episode_idx, :, 0], pca_samples[episode_idx, :, 1], c=colors, marker=".")
-    plt.axis('off')
-    plt.axis('equal')
-    plt.savefig(fig_dir / "diffusion_samples_pca.png")
+        plt.figure(figsize=(4, 4), dpi=300)
+        for episode_idx in range(n_episodes):
+            plt.scatter(pca_samples[episode_idx, :, 0], pca_samples[episode_idx, :, 1], c=colors, marker=".")
+        plt.axis('off')
+        plt.axis('equal')
+        plt.savefig(fig_dir / "diffusion_samples_pca.png")
 
-    from sklearn.manifold import MDS
-    mds = MDS(n_components=2)
-    mds_samples = mds.fit_transform(samples)
-    mds_samples = mds_samples.reshape(n_episodes, n_diffusion_steps, 2)
+        logging.info("Plotting MDS of diffusion samples.")
+        from sklearn.manifold import MDS
+        mds = MDS(n_components=2)
+        mds_samples = mds.fit_transform(samples)
+        mds_samples = mds_samples.reshape(n_episodes, n_diffusion_steps, 2)
 
-    plt.figure(figsize=(4, 4), dpi=300)
-    for episode_idx in range(n_episodes):
-        plt.scatter(mds_samples[episode_idx, :, 0], mds_samples[episode_idx, :, 1], c=colors, marker=".")
-    plt.axis("off")
-    plt.axis("equal")
-    plt.savefig(fig_dir / "diffusion_samples_mds.png")
+        plt.figure(figsize=(4, 4), dpi=300)
+        for episode_idx in range(n_episodes):
+            plt.scatter(mds_samples[episode_idx, :, 0], mds_samples[episode_idx, :, 1], c=colors, marker=".")
+        plt.axis("off")
+        plt.axis("equal")
+        plt.savefig(fig_dir / "diffusion_samples_mds.png")
 
 
 def main(
@@ -750,8 +789,9 @@ def main(
 
     env.close()
 
-    plot_endpoint_barchart = hydra_cfg.env['task'] == 'straight_lines-4_directions'
-    analyze_episodes(episodes, out_dir, max_episodes_rendered=max_episodes_rendered, plot_endpoint_barchart=plot_endpoint_barchart)
+    plot_endpoint_barchart = 'straight_lines-4_directions' in hydra_cfg.env['task']
+    plot_pca_and_mds = False
+    analyze_episodes(episodes, out_dir, max_episodes_rendered=max_episodes_rendered, plot_endpoint_barchart=plot_endpoint_barchart, plot_pca_and_mds=plot_pca_and_mds)
 
     logging.info("End of eval")
 
