@@ -664,22 +664,70 @@ def analyze_episodes(episodes, out_dir, max_episodes_rendered=20, plot_endpoint_
     plt.savefig(fig_dir / "diffusion_samples_mds.png")
 
 
-def target_distance_guidance(model, sample, t):
-    if t < 50:
+
+class TargetDistanceGuidance:
+    def __init__(self, batch_size, normalize=None, T=25, lambd=30, reach_threshold=0.2, device="cpu"):
+        # TODO: normalize the targets
+        # sequence of target to reach in order
+        self.targets = torch.tensor([
+            [0, 1.0],
+            [0, 0],
+            [0, -1.0],
+            [0, 0],
+            [1.0, 0],
+            [0, 0],
+            [-1.0, 0],
+            [0, 0],
+            [0, 1.0],
+            [0, 0],
+            [0, -1.0],
+            [0, 0]
+        ]).to(device)  # num_targets x 2
+        self.current_target_idx = torch.zeros(batch_size, dtype=torch.int).to(device)  # batch_size
+        self.T = T
+        self.lambd = lambd
+        self.reach_threshold = reach_threshold
+
+    def __call__(self, model, sample, t):
+        target = self.targets[self.current_target_idx]  # batch_size x 2
+
+        if t >= self.T:
+            with torch.inference_mode(False):
+                _sample = sample.clone().detach().requires_grad_(True)
+                distance = torch.norm(_sample - target[:, None], p=2, dim=-1)
+                distance = distance.mean()
+                gradient = torch.autograd.grad(distance, _sample)[0]
+
+            sample = sample - self.lambd * gradient
+        
+        if t == 0:
+            # check if target is reached
+            distance = torch.norm(sample - target[:, None], p=2, dim=-1)  # batch_size x horizon
+            # TODO: check the max distance to target?
+            is_reached = torch.mean(distance, dim=1) < self.reach_threshold  # batch_size
+
+            # increment the target index if the target is reached
+            self.current_target_idx = is_reached * (self.current_target_idx + 1) + ~is_reached * self.current_target_idx
+
         return sample
 
-    target = torch.tensor([0, 0.5], device=sample.device)
-    lambd = 30
 
-    with torch.inference_mode(False):
-        _sample = sample.clone().detach().requires_grad_(True)
+# def target_distance_guidance(model, sample, t):
+#     if t < 50:
+#         return sample
 
-        distance = torch.norm(_sample - target, p=2, dim=-1)
-        distance = distance.mean()
-        gradient = torch.autograd.grad(distance, _sample)[0]
+#     target = torch.tensor([0, 1.0], device=sample.device)
+#     lambd = 60
 
-    sample = sample - lambd * gradient
-    return sample
+#     with torch.inference_mode(False):
+#         _sample = sample.clone().detach().requires_grad_(True)
+
+#         distance = torch.norm(_sample - target, p=2, dim=-1)
+#         distance = distance.mean()
+#         gradient = torch.autograd.grad(distance, _sample)[0]
+
+#     sample = sample - lambd * gradient
+#     return sample
 
 
 def main(
@@ -733,7 +781,12 @@ def main(
     policy.diffusion.conditional_sample = conditional_sample.__get__(policy.diffusion)
 
     # add guidance callback
-    policy.diffusion.guidance_callback = target_distance_guidance.__get__(policy.diffusion)
+    guidance = TargetDistanceGuidance(batch_size=hydra_cfg.eval.batch_size, device=device)
+    def _guidance_callback(model, sample, t, guidance=guidance):
+        return guidance(model, sample, t)
+
+    policy.diffusion.guidance_callback = _guidance_callback.__get__(policy.diffusion)
+    # policy.diffusion.guidance_callback = target_distance_guidance.__get__(policy.diffusion)
 
     max_episodes_rendered = 20
 
